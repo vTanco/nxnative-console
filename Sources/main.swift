@@ -1,0 +1,513 @@
+// Console: a home screen for the TV that lists the nxnative games in /Applications and is driven by a game controller.
+// It runs in the background from login (LaunchAgent, --hidden) and comes to the front when a controller connects, when it is opened
+// again, or when a game started from it ends. A starts the selected game without its settings window; + opens the options;
+// holding HOME (1.2 s) while a game runs quits the game and comes back here. Arrows, Return, Escape and Tab do the same on a keyboard.
+// --snapshot <file.png> draws the screen into a PNG at 1920x1080 and exits (to check the look without taking over the screen).
+import AppKit
+import SwiftUI
+import GameController
+import IOKit.ps
+
+let cyan = Color(red: 0.0, green: 0.76, blue: 0.89)
+let gamePrefix = "org.nxnative."
+// Games from other ports, by bundle identifier: one per line in ~/Library/Application Support/Console/extra.txt
+let extraIDs: Set<String> = {
+    var ids: Set<String> = []
+    let f = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/Console/extra.txt")
+    for l in ((try? String(contentsOf: f, encoding: .utf8)) ?? "").split(separator: "\n") {
+        let t = l.trimmingCharacters(in: .whitespaces); if !t.isEmpty && !t.hasPrefix("#") { ids.insert(t) }
+    }
+    return ids
+}()
+// The text in the Mac's language (System Settings > General > Language & Region), English for a language it has no text in.
+// --lang <code> picks one (to check a translation).
+let strings: [String: [String: String]] = [
+    "en": ["noGames": "No games found in Applications", "connect": "Connect a controller", "play": "Play", "options": "Options",
+           "homeHint": "Hold in a game: back here", "close": "B: close", "m0": "Play with the game's settings", "m1": "Refresh the list",
+           "m2": "Swap the A and B buttons", "m3": "Exit to the desktop", "m4": "Put the Mac to sleep"],
+    "es": ["noGames": "No hay juegos en Aplicaciones", "connect": "Conecta un mando", "play": "Jugar", "options": "Opciones",
+           "homeHint": "Mantener en el juego: volver aquí", "close": "B: cerrar", "m0": "Jugar con los ajustes del juego", "m1": "Actualizar la lista",
+           "m2": "Intercambiar los botones A y B", "m3": "Salir al escritorio", "m4": "Poner el Mac en reposo"],
+    "fr": ["noGames": "Aucun jeu dans Applications", "connect": "Connectez une manette", "play": "Jouer", "options": "Options",
+           "homeHint": "Maintenir en jeu : revenir ici", "close": "B : fermer", "m0": "Jouer avec les réglages du jeu", "m1": "Actualiser la liste",
+           "m2": "Inverser les boutons A et B", "m3": "Quitter vers le bureau", "m4": "Suspendre le Mac"],
+    "de": ["noGames": "Keine Spiele in Programme", "connect": "Controller verbinden", "play": "Spielen", "options": "Optionen",
+           "homeHint": "Im Spiel halten: hierher zurück", "close": "B: schließen", "m0": "Mit den Spieleinstellungen spielen", "m1": "Liste aktualisieren",
+           "m2": "Tasten A und B tauschen", "m3": "Zum Schreibtisch", "m4": "Mac in den Ruhezustand"],
+    "it": ["noGames": "Nessun gioco in Applicazioni", "connect": "Collega un controller", "play": "Gioca", "options": "Opzioni",
+           "homeHint": "Tieni premuto nel gioco: torna qui", "close": "B: chiudi", "m0": "Gioca con le impostazioni del gioco", "m1": "Aggiorna l'elenco",
+           "m2": "Scambia i pulsanti A e B", "m3": "Esci alla scrivania", "m4": "Metti il Mac in stop"],
+    "pt": ["noGames": "Nenhum jogo em Aplicativos", "connect": "Conecte um controle", "play": "Jogar", "options": "Opções",
+           "homeHint": "Segure no jogo: voltar aqui", "close": "B: fechar", "m0": "Jogar com os ajustes do jogo", "m1": "Atualizar a lista",
+           "m2": "Trocar os botões A e B", "m3": "Sair para a mesa", "m4": "Colocar o Mac em repouso"],
+]
+let lang: String = {
+    let a = CommandLine.arguments
+    if let i = a.firstIndex(of: "--lang"), i + 1 < a.count { return a[i + 1] }
+    let code = String((Locale.preferredLanguages.first ?? "en").prefix(2))
+    return strings[code] != nil ? code : "en"
+}()
+func L(_ k: String) -> String { strings[lang]?[k] ?? strings["en"]?[k] ?? k }
+
+func isGame(_ id: String?) -> Bool { guard let id else { return false }; return id.hasPrefix(gamePrefix) || extraIDs.contains(id) }
+
+struct Game: Identifiable { let id: String; let name: String; let url: URL; let icon: NSImage }
+
+// The icon of an app as a square tile picture. Icons drawn as a macOS rounded square with a transparent margin (the ones made from
+// box art) are cropped to the inside of that square, so that every tile is a full square picture like the game icons from the games' own data.
+func tileImage(_ url: URL) -> NSImage {
+    var img: NSImage?
+    if let f = Bundle(url: url)?.object(forInfoDictionaryKey: "CFBundleIconFile") as? String {
+        img = NSImage(contentsOf: url.appendingPathComponent("Contents/Resources/" + (f.hasSuffix(".icns") ? f : f + ".icns")))
+    }
+    let base = img ?? NSWorkspace.shared.icon(forFile: url.path)
+    var r = NSRect(x: 0, y: 0, width: 1024, height: 1024)
+    guard let cg = base.cgImage(forProposedRect: &r, context: nil, hints: nil) else { return base }
+    let w = cg.width, h = cg.height
+    if let ctx = CGContext(data: nil, width: 1, height: 1, bitsPerComponent: 8, bytesPerRow: 4, space: CGColorSpaceCreateDeviceRGB(),
+                           bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) {
+        ctx.draw(cg, in: CGRect(x: -2, y: 3 - CGFloat(h), width: CGFloat(w), height: CGFloat(h)))   // the pixel 2,2 from the top left
+        if let d = ctx.data, d.load(fromByteOffset: 3, as: UInt8.self) < 16 {
+            let s = CGFloat(w) / 1024
+            if let c = cg.cropping(to: CGRect(x: 154 * s, y: 164 * s, width: 716 * s, height: 716 * s)) { return NSImage(cgImage: c, size: NSSize(width: 512, height: 512)) }
+        }
+    }
+    return NSImage(cgImage: cg, size: NSSize(width: 512, height: 512))
+}
+
+final class Model: ObservableObject {
+    @Published var games: [Game] = []
+    @Published var sel = 0
+    @Published var launching: Game?
+    @Published var controller: String?
+    @Published var now = Date()
+    @Published var battery: Int?
+    @Published var charging = false
+    @Published var menuOpen = false
+    @Published var menuSel = 0
+    @Published var logo = false       // the opening: the logo on black
+    @Published var logoIn = false     // the logo has come in
+    @Published var revealed = true    // the bars and the tiles are in place (they come in one after another)
+    let menuItems = (0..<5).map { L("m\($0)") }
+
+    var lastPlayed: [String: Double] {
+        get { UserDefaults.standard.dictionary(forKey: "lastPlayed") as? [String: Double] ?? [:] }
+        set { UserDefaults.standard.set(newValue, forKey: "lastPlayed") }
+    }
+
+    func scan() {
+        let fm = FileManager.default; var out: [Game] = []; var seen = Set<String>()
+        for d in [URL(fileURLWithPath: "/Applications"), fm.homeDirectoryForCurrentUser.appendingPathComponent("Applications")] {
+            for u in (try? fm.contentsOfDirectory(at: d, includingPropertiesForKeys: nil)) ?? [] where u.pathExtension == "app" {
+                guard let b = Bundle(url: u), let id = b.bundleIdentifier, isGame(id), !seen.contains(id) else { continue }
+                seen.insert(id)
+                out.append(Game(id: id, name: u.deletingPathExtension().lastPathComponent, url: u, icon: tileImage(u)))
+            }
+        }
+        let lp = lastPlayed
+        out.sort { let a = lp[$0.id] ?? 0, b = lp[$1.id] ?? 0; return a != b ? a > b : $0.name < $1.name }
+        games = out
+        if sel >= games.count { sel = max(0, games.count - 1) }
+    }
+
+    func readBattery() {
+        guard let info = IOPSCopyPowerSourcesInfo()?.takeRetainedValue(),
+              let list = IOPSCopyPowerSourcesList(info)?.takeRetainedValue() as? [CFTypeRef] else { battery = nil; return }
+        for ps in list {
+            if let d = IOPSGetPowerSourceDescription(info, ps)?.takeUnretainedValue() as? [String: Any], let cur = d[kIOPSCurrentCapacityKey] as? Int {
+                battery = cur; charging = (d[kIOPSPowerSourceStateKey] as? String) == kIOPSACPowerValue
+            }
+        }
+    }
+}
+
+struct HomeView: View {
+    @ObservedObject var m: Model
+    var snapshot = false   // ImageRenderer draws no ScrollView content: the snapshot lays the row out without one
+
+    func font(_ s: CGFloat, _ w: Font.Weight = .regular) -> Font { .system(size: s, weight: w, design: .rounded) }
+
+    var body: some View {
+        GeometryReader { geo in
+            let H = geo.size.height, tile = H * 0.30
+            ZStack {
+                LinearGradient(colors: [Color(white: 0.20), Color(white: 0.13)], startPoint: .top, endPoint: .bottom).ignoresSafeArea()
+                VStack(spacing: 0) {
+                    topBar(H)
+                        .opacity(m.revealed ? 1 : 0).offset(y: m.revealed ? 0 : -H * 0.04)
+                        .animation(.easeOut(duration: 0.5).delay(0.05), value: m.revealed)
+                    Spacer()
+                    if m.games.isEmpty {
+                        Text(L("noGames")).font(font(H * 0.035)).foregroundColor(.gray)
+                    } else if snapshot {
+                        HStack(alignment: .bottom, spacing: tile * 0.09) {
+                            ForEach(Array(m.games.enumerated()), id: \.element.id) { i, g in tileView(g, i, tile, H) }
+                        }
+                        .padding(.horizontal, H * 0.09).padding(.vertical, H * 0.05)
+                        .frame(width: geo.size.width, alignment: .leading).clipped()
+                    } else {
+                        ScrollViewReader { proxy in
+                            ScrollView(.horizontal, showsIndicators: false) {
+                                HStack(alignment: .bottom, spacing: tile * 0.09) {
+                                    ForEach(Array(m.games.enumerated()), id: \.element.id) { i, g in
+                                        tileView(g, i, tile, H).id(i)
+                                    }
+                                }
+                                .padding(.horizontal, H * 0.09).padding(.vertical, H * 0.05)
+                            }
+                            .onChange(of: m.sel) { _, new in withAnimation(.easeOut(duration: 0.18)) { proxy.scrollTo(new, anchor: .center) } }
+                            .onAppear { proxy.scrollTo(m.sel, anchor: .center) }
+                        }
+                    }
+                    Spacer()
+                    bottomBar(H)
+                        .opacity(m.revealed ? 1 : 0).offset(y: m.revealed ? 0 : H * 0.04)
+                        .animation(.easeOut(duration: 0.5).delay(0.15), value: m.revealed)
+                }
+                if m.logo { logoView(H).transition(.asymmetric(insertion: .identity, removal: .opacity.combined(with: .scale(scale: 1.12)))) }
+                if let g = m.launching { launchingView(g, H).transition(.opacity) }
+                if m.menuOpen { menuView(H).transition(.opacity) }
+            }
+            .animation(.easeOut(duration: 0.2), value: m.menuOpen)
+            .animation(.easeIn(duration: 0.45), value: m.logo)
+            .animation(.easeOut(duration: 0.25), value: m.launching?.id)
+        }
+    }
+
+    func topBar(_ H: CGFloat) -> some View {
+        HStack(spacing: H * 0.02) {
+            Image(systemName: "person.crop.circle.fill").font(.system(size: H * 0.055)).foregroundColor(Color(white: 0.55))
+            Spacer()
+            Text(m.now, format: .dateTime.hour(.twoDigits(amPM: .omitted)).minute(.twoDigits)).font(font(H * 0.032, .medium))
+            if let b = m.battery {
+                HStack(spacing: H * 0.006) {
+                    Text("\(b)%").font(font(H * 0.026))
+                    Image(systemName: m.charging ? "battery.100.bolt" : b > 70 ? "battery.100" : b > 40 ? "battery.75" : b > 15 ? "battery.25" : "battery.0")
+                        .font(.system(size: H * 0.03))
+                }
+            }
+        }
+        .foregroundColor(.white)
+        .padding(.horizontal, H * 0.06).padding(.top, H * 0.045)
+    }
+
+    func tileView(_ g: Game, _ i: Int, _ tile: CGFloat, _ H: CGFloat) -> some View {
+        let on = i == m.sel
+        return VStack(alignment: .leading, spacing: H * 0.018) {
+            Text(g.name).font(font(H * 0.032, .medium)).foregroundColor(cyan).lineLimit(1).fixedSize()
+                .frame(width: tile, alignment: .leading).opacity(on ? 1 : 0)
+            Image(nsImage: g.icon).resizable().interpolation(.high).aspectRatio(contentMode: .fill)
+                .frame(width: tile, height: tile).clipShape(RoundedRectangle(cornerRadius: tile * 0.03))
+                .shadow(color: .black.opacity(0.45), radius: H * 0.012, y: H * 0.006)
+                .overlay(RoundedRectangle(cornerRadius: tile * 0.05).stroke(on ? cyan : .clear, lineWidth: H * 0.006).padding(-H * 0.009))
+                .scaleEffect(on ? 1.04 : 1)
+                .animation(.easeOut(duration: 0.15), value: on)
+        }
+        .opacity(m.revealed ? 1 : 0).offset(y: m.revealed ? 0 : H * 0.10).scaleEffect(m.revealed ? 1 : 0.9)
+        .animation(.spring(response: 0.6, dampingFraction: 0.78).delay(0.08 + Double(min(i, 8)) * 0.07), value: m.revealed)
+    }
+
+    func logoView(_ H: CGFloat) -> some View {
+        let red = LinearGradient(colors: [Color(red: 0.97, green: 0.18, blue: 0.18), Color(red: 0.76, green: 0.04, blue: 0.08)], startPoint: .top, endPoint: .bottom)
+        return ZStack {
+            Color.black.ignoresSafeArea()
+            RadialGradient(colors: [Color(red: 0.9, green: 0.1, blue: 0.12).opacity(m.logoIn ? 0.28 : 0), .clear], center: .center, startRadius: 0, endRadius: H * 0.6)
+                .ignoresSafeArea()
+            VStack(spacing: H * 0.04) {
+                RoundedRectangle(cornerRadius: H * 0.05).fill(red).frame(width: H * 0.22, height: H * 0.22)
+                    .overlay(Image(systemName: "gamecontroller.fill").font(.system(size: H * 0.105, weight: .semibold)).foregroundColor(.white))
+                    .shadow(color: Color.red.opacity(m.logoIn ? 0.55 : 0), radius: H * 0.05)
+                    .rotationEffect(.degrees(m.logoIn ? 0 : -12))
+                Text("CONSOLE").font(font(H * 0.04, .heavy)).foregroundColor(.white).tracking(m.logoIn ? H * 0.012 : H * 0.04)
+                    .opacity(m.logoIn ? 1 : 0)
+            }
+            .scaleEffect(m.logoIn ? 1 : 0.6).opacity(m.logoIn ? 1 : 0).blur(radius: m.logoIn ? 0 : H * 0.015)
+        }
+        .animation(.spring(response: 0.7, dampingFraction: 0.7), value: m.logoIn)
+    }
+
+    func hint(_ symbol: String, _ text: String, _ H: CGFloat) -> some View {
+        HStack(spacing: H * 0.008) { Image(systemName: symbol).font(.system(size: H * 0.032)); Text(text).font(font(H * 0.024)) }
+    }
+
+    func bottomBar(_ H: CGFloat) -> some View {
+        VStack(spacing: 0) {
+            Rectangle().fill(Color.white.opacity(0.15)).frame(height: 1).padding(.horizontal, H * 0.04)
+            HStack(spacing: H * 0.035) {
+                Image(systemName: "gamecontroller.fill").font(.system(size: H * 0.03)).foregroundColor(m.controller == nil ? .gray : cyan)
+                Text(m.controller ?? L("connect")).font(font(H * 0.024))
+                Spacer()
+                hint("a.circle.fill", L("play"), H)
+                hint("plus.circle.fill", L("options"), H)
+                hint("house.circle.fill", L("homeHint"), H)
+            }
+            .foregroundColor(.white).padding(.horizontal, H * 0.06).frame(height: H * 0.10)
+        }
+    }
+
+    func launchingView(_ g: Game, _ H: CGFloat) -> some View {
+        ZStack {
+            Color.black.opacity(0.88).ignoresSafeArea()
+            VStack(spacing: H * 0.03) {
+                Image(nsImage: g.icon).resizable().interpolation(.high).frame(width: H * 0.3, height: H * 0.3)
+                    .clipShape(RoundedRectangle(cornerRadius: H * 0.012))
+                Text(g.name).font(font(H * 0.04, .semibold)).foregroundColor(.white)
+                ProgressView().controlSize(.large).tint(.white)
+            }
+        }
+    }
+
+    func menuView(_ H: CGFloat) -> some View {
+        ZStack {
+            Color.black.opacity(0.6).ignoresSafeArea()
+            VStack(alignment: .leading, spacing: H * 0.012) {
+                Text(L("options")).font(font(H * 0.04, .bold)).foregroundColor(.white).padding(.bottom, H * 0.01)
+                ForEach(m.menuItems.indices, id: \.self) { i in
+                    Text(m.menuItems[i]).font(font(H * 0.03)).foregroundColor(.white)
+                        .padding(.horizontal, H * 0.025).padding(.vertical, H * 0.014)
+                        .frame(width: H * 0.75, alignment: .leading)
+                        .background(RoundedRectangle(cornerRadius: H * 0.012).fill(i == m.menuSel ? cyan.opacity(0.22) : .clear))
+                        .overlay(RoundedRectangle(cornerRadius: H * 0.012).stroke(i == m.menuSel ? cyan : .clear, lineWidth: H * 0.004))
+                }
+                Text(L("close")).font(font(H * 0.022)).foregroundColor(.gray).padding(.top, H * 0.01)
+            }
+            .padding(H * 0.045)
+            .background(RoundedRectangle(cornerRadius: H * 0.025).fill(Color(white: 0.21)))
+        }
+    }
+}
+
+final class HomeWindow: NSWindow {
+    var onKey: ((UInt16) -> Void)?
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { true }
+    override func keyDown(with e: NSEvent) { onKey?(e.keyCode) }
+}
+
+func isBuiltIn(_ s: NSScreen) -> Bool {
+    guard let n = s.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else { return true }
+    return CGDisplayIsBuiltin(n.uint32Value) != 0
+}
+
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    let m = Model()
+    var window: HomeWindow!
+    var timer: Timer?
+    var running: String?          // the game started from here (or the one HOME asked to quit)
+    let startedAt = Date()
+    var lastDir = 0, dirSince = Date.distantPast, lastRepeat = Date.distantPast
+    var prevA = false, prevB = false, prevMenu = false
+    var homeSince: Date?, homeDone = false
+
+    func applicationDidFinishLaunching(_ n: Notification) {
+        GCController.shouldMonitorBackgroundEvents = true   // HOME must work while a game is in front
+        window = HomeWindow(contentRect: NSRect(x: 0, y: 0, width: 1280, height: 720), styleMask: [.borderless], backing: .buffered, defer: false)
+        window.contentView = NSHostingView(rootView: HomeView(m: m))
+        window.backgroundColor = .black
+        window.isReleasedWhenClosed = false
+        window.collectionBehavior = [.fullScreenNone, .canJoinAllSpaces]
+        window.onKey = { [weak self] k in self?.key(k) }
+        let nc = NotificationCenter.default
+        nc.addObserver(forName: .GCControllerDidConnect, object: nil, queue: .main) { [weak self] _ in self?.controllerConnected() }
+        nc.addObserver(forName: .GCControllerDidDisconnect, object: nil, queue: .main) { [weak self] _ in self?.updateController() }
+        nc.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main) { [weak self] _ in
+            if self?.window.isVisible == true { self?.place() }
+        }
+        NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didTerminateApplicationNotification, object: nil, queue: .main) { [weak self] n in
+            guard let self, let app = n.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
+                  let id = app.bundleIdentifier, id == self.running else { return }
+            self.gameEnded(id)
+        }
+        timer = Timer(timeInterval: 1.0 / 60, repeats: true) { [weak self] _ in self?.poll() }
+        RunLoop.main.add(timer!, forMode: .common)
+        m.readBattery()
+        updateController()
+        if CommandLine.arguments.contains("--hidden") { NSApp.setActivationPolicy(.accessory) } else { show() }
+    }
+
+    func applicationShouldHandleReopen(_ s: NSApplication, hasVisibleWindows f: Bool) -> Bool { if running == nil { show() }; return false }
+    func applicationDidBecomeActive(_ n: Notification) { if window.isVisible { NSApp.presentationOptions = [.hideDock, .hideMenuBar] } }
+
+    // MARK: showing and hiding
+
+    func show(intro: Bool = true) {
+        let wasVisible = window.isVisible
+        m.scan(); m.sel = 0; m.launching = nil; m.menuOpen = false; m.now = Date(); m.readBattery()
+        if !wasVisible { opening(full: intro) }
+        NSApp.setActivationPolicy(.regular)
+        place()
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        NSCursor.setHiddenUntilMouseMoves(true)
+    }
+
+    // The opening: the logo comes in on black, then fades out larger while the bars and the tiles come in one after another.
+    // Back from a game there is no logo, only the tiles coming in.
+    func opening(full: Bool) {
+        m.revealed = false; m.logoIn = false; m.logo = full
+        if full {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { self.m.logoIn = true; self.sound("Glass") }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { self.m.logo = false }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.7) { self.m.revealed = true }
+        } else {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { self.m.revealed = true }
+        }
+    }
+
+    func place() {   // the TV (any screen that is not the Mac's own) when there is one
+        let s = NSScreen.screens.first(where: { !isBuiltIn($0) }) ?? NSScreen.main ?? NSScreen.screens[0]
+        window.setFrame(s.frame, display: true)
+    }
+
+    func hide() {
+        NSApp.presentationOptions = []
+        window.orderOut(nil)
+        NSApp.setActivationPolicy(.accessory)
+    }
+
+    func controllerConnected() {
+        updateController()
+        let gameRunning = NSWorkspace.shared.runningApplications.contains { isGame($0.bundleIdentifier) }
+        if Date().timeIntervalSince(startedAt) > 3, running == nil, !gameRunning, !window.isVisible { show() }
+    }
+
+    func updateController() {
+        m.controller = GCController.controllers().first(where: { $0.extendedGamepad != nil }).map { $0.vendorName ?? $0.productCategory }
+    }
+
+    // MARK: games
+
+    func setSettingsWindow(_ id: String, shown: Bool?) {
+        CFPreferencesSetAppValue("window.show" as CFString, shown.map { $0 as CFBoolean } ?? nil, id as CFString)
+        CFPreferencesAppSynchronize(id as CFString)
+    }
+
+    func launch(_ g: Game, settings: Bool = false) {
+        guard running == nil else { return }
+        if !settings && g.id.hasPrefix(gamePrefix) { setSettingsWindow(g.id, shown: false) }   // straight into the game with its saved settings
+        var lp = m.lastPlayed; lp[g.id] = Date().timeIntervalSince1970; m.lastPlayed = lp
+        running = g.id; m.launching = g; m.menuOpen = false
+        sound("Pop")
+        let cfg = NSWorkspace.OpenConfiguration(); cfg.activates = true
+        NSWorkspace.shared.openApplication(at: g.url, configuration: cfg) { [weak self] _, err in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                if err != nil { if g.id.hasPrefix(gamePrefix) { self.setSettingsWindow(g.id, shown: nil) }; self.running = nil; self.m.launching = nil; return }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { if self.running == g.id { self.hide() } }
+            }
+        }
+    }
+
+    func gameEnded(_ id: String) {
+        if id.hasPrefix(gamePrefix) { setSettingsWindow(id, shown: nil) }   // opened from Finder, the game shows its settings window again
+        running = nil
+        show(intro: false)
+    }
+
+    func homeHeld() {   // quit the game in front (⌘Q, so the game can close cleanly), then this screen comes back
+        let games = NSWorkspace.shared.runningApplications.filter { isGame($0.bundleIdentifier) }
+        if games.isEmpty { if !window.isVisible { show() }; return }
+        sound("Pop")
+        for g in games {
+            if running == nil { running = g.bundleIdentifier }
+            g.terminate()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 10) { if !g.isTerminated { g.forceTerminate() } }
+        }
+    }
+
+    // MARK: input
+
+    func sound(_ name: String) { if let s = NSSound(named: NSSound.Name(name)) { s.volume = 0.25; s.play() } }
+
+    func poll() {
+        let now = Date()
+        if now.timeIntervalSince(m.now) >= 1 {
+            m.now = now
+            if Int(now.timeIntervalSince1970) % 30 == 0 { m.readBattery() }
+        }
+        guard let ctl = GCController.controllers().first(where: { $0.extendedGamepad != nil }), let pad = ctl.extendedGamepad else { return }
+        if let home = pad.buttonHome, home.isPressed {
+            if homeSince == nil { homeSince = now } else if !homeDone, now.timeIntervalSince(homeSince!) > 1.2 { homeDone = true; homeHeld() }
+        } else { homeSince = nil; homeDone = false }
+        // Nintendo controllers have A on the right: confirm with the right button there, with the bottom one elsewhere (the options swap them)
+        let cat = (ctl.productCategory + " " + (ctl.vendorName ?? "")).lowercased()
+        let nintendo = cat.contains("switch") || cat.contains("joy-con") || cat.contains("pro controller")
+        let swap = nintendo != UserDefaults.standard.bool(forKey: "swapAB")
+        let a = (swap ? pad.buttonB : pad.buttonA).isPressed, b = (swap ? pad.buttonA : pad.buttonB).isPressed, menu = pad.buttonMenu.isPressed
+        defer { prevA = a; prevB = b; prevMenu = menu }
+        guard window.isVisible, NSApp.isActive, running == nil, !m.logo else { lastDir = 0; return }
+        let x = pad.dpad.xAxis.value + pad.leftThumbstick.xAxis.value, y = pad.dpad.yAxis.value + pad.leftThumbstick.yAxis.value
+        var dir = 0
+        if abs(x) > 0.5, abs(x) >= abs(y) { dir = x > 0 ? 1 : -1 } else if abs(y) > 0.5 { dir = y > 0 ? 2 : -2 }
+        if dir != lastDir { lastDir = dir; dirSince = now; lastRepeat = now; if dir != 0 { move(dir) } }
+        else if dir != 0, now.timeIntervalSince(dirSince) > 0.4, now.timeIntervalSince(lastRepeat) > 0.11 { lastRepeat = now; move(dir) }
+        if a && !prevA { confirm() }
+        if b && !prevB { back() }
+        if menu && !prevMenu { toggleMenu() }
+    }
+
+    func key(_ k: UInt16) {
+        guard running == nil else { return }
+        switch k {
+        case 123: move(-1)
+        case 124: move(1)
+        case 126: move(2)
+        case 125: move(-2)
+        case 36, 76: confirm()
+        case 53: if m.menuOpen { back() } else { hide() }
+        case 48: toggleMenu()
+        default: break
+        }
+    }
+
+    func move(_ dir: Int) {   // 1 right, -1 left, 2 up, -2 down
+        if m.menuOpen {
+            guard abs(dir) == 2 else { return }
+            let n = min(max(m.menuSel + (dir > 0 ? -1 : 1), 0), m.menuItems.count - 1)
+            if n != m.menuSel { m.menuSel = n; sound("Tink") }
+            return
+        }
+        guard abs(dir) == 1, !m.games.isEmpty else { return }
+        let n = min(max(m.sel + dir, 0), m.games.count - 1)
+        if n != m.sel { m.sel = n; sound("Tink") }
+    }
+
+    func confirm() {
+        if m.menuOpen { menuAction(m.menuSel); return }
+        if m.games.indices.contains(m.sel) { launch(m.games[m.sel]) }
+    }
+
+    func back() { if m.menuOpen { m.menuOpen = false } }
+
+    func toggleMenu() { m.menuSel = 0; m.menuOpen.toggle() }
+
+    func menuAction(_ i: Int) {
+        switch i {
+        case 0: if m.games.indices.contains(m.sel) { launch(m.games[m.sel], settings: true) }
+        case 1: m.scan(); m.menuOpen = false
+        case 2: UserDefaults.standard.set(!UserDefaults.standard.bool(forKey: "swapAB"), forKey: "swapAB"); m.menuOpen = false
+        case 3: m.menuOpen = false; hide()
+        case 4:
+            m.menuOpen = false; hide()
+            let p = Process(); p.executableURL = URL(fileURLWithPath: "/usr/bin/pmset"); p.arguments = ["sleepnow"]; try? p.run()
+        default: break
+        }
+    }
+}
+
+if let i = CommandLine.arguments.firstIndex(of: "--snapshot"), i + 1 < CommandLine.arguments.count { MainActor.assumeIsolated {
+    let m = Model(); m.scan(); m.readBattery(); m.controller = "Xbox Wireless Controller"; m.sel = min(1, max(0, m.games.count - 1))
+    if CommandLine.arguments.contains("--menu") { m.menuOpen = true; m.menuSel = 1 }
+    if CommandLine.arguments.contains("--intro") { m.logo = true; m.logoIn = true }
+    let r = ImageRenderer(content: HomeView(m: m, snapshot: true).frame(width: 1920, height: 1080).environment(\.colorScheme, .dark))
+    r.scale = 1
+    if let img = r.nsImage, let t = img.tiffRepresentation, let rep = NSBitmapImageRep(data: t), let png = rep.representation(using: .png, properties: [:]) {
+        try? png.write(to: URL(fileURLWithPath: CommandLine.arguments[i + 1]))
+    }
+    exit(0)
+} }
+
+let app = NSApplication.shared
+let delegate = AppDelegate()
+app.delegate = delegate
+app.run()
