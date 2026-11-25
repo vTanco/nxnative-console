@@ -377,6 +377,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             askedAccess = true
             _ = AXIsProcessTrustedWithOptions([kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary)
         }
+        log("Accessibility (to close notifications): \(AXIsProcessTrusted() ? "allowed" : "not allowed")")
         dismissNotifications()
     }
 
@@ -484,7 +485,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: input
 
-    func sound(_ name: String) { if let s = NSSound(named: NSSound.Name(name)) { s.volume = 0.25; s.play() } }
+    // NSSound(named:) is one shared sound: play() while it still plays does nothing (every other move was silent), so it is restarted
+    func sound(_ name: String) { if let s = NSSound(named: NSSound.Name(name)) { s.volume = 0.25; s.stop(); s.play() } }
 
     func poll() {
         let now = Date()

@@ -14,5 +14,9 @@ fi
 APP=build/Console.app; rm -rf $APP; mkdir -p $APP/Contents/MacOS $APP/Contents/Resources
 swiftc -O -swift-version 5 Sources/main.swift -o $APP/Contents/MacOS/Console
 cp Resources/Info.plist $APP/Contents/; cp Resources/AppIcon.icns $APP/Contents/Resources/
-codesign --force --sign - $APP   # ad-hoc: built on this Mac, so Gatekeeper does not quarantine it
+# Signed with "Console Local Signing" when scripts/make-signing-identity.sh has made it: the same signature on every build, so macOS keeps
+# the Accessibility permission across updates. Otherwise ad hoc (built on this Mac, so Gatekeeper does not quarantine it either way).
+SIGN=-; security find-identity -v -p codesigning 2>/dev/null | grep -q '"Console Local Signing"' && SIGN="Console Local Signing"
+codesign --force --sign "$SIGN" $APP
+echo "signed with: $SIGN"
 echo "built $APP"
