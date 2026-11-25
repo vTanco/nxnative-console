@@ -8,6 +8,7 @@ import SwiftUI
 import GameController
 import IOKit.ps
 import IOBluetooth
+import ApplicationServices
 
 let cyan = Color(red: 0.0, green: 0.76, blue: 0.89)
 let gamePrefix = "org.nxnative."
@@ -302,6 +303,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var quietUntil = Date.distantPast   // a controller turned off from here may connect again for a moment: no coming up for it
     var hadController = false, lastCheck = Date.distantPast, prevWake = false
     var cursorHidden = false
+    var lastDismiss = Date.distantPast, askedAccess = false
 
     // ~/Library/Logs/Console/console.log: controllers coming and going, the buttons that bring this screen up, showing and hiding
     let logURL: URL = {
@@ -371,6 +373,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.activate(ignoringOtherApps: true)
         setCursorHidden(true)
         log("shown")
+        if !askedAccess {   // closing notification banners needs Accessibility: macOS asks once (System Settings › Privacy & Security › Accessibility)
+            askedAccess = true
+            _ = AXIsProcessTrustedWithOptions([kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary)
+        }
+        dismissNotifications()
+    }
+
+    // Closes the notification banners on screen (the top right corner), as their close button does: a controller cannot reach them.
+    // Notification Center's elements with a close or clear action, in the languages the menus are in. Needs Accessibility; without it, nothing.
+    func dismissNotifications() {
+        guard AXIsProcessTrusted(),
+              let nc = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.notificationcenterui").first else { return }
+        let words = ["close", "clear", "dismiss", "cerrar", "borrar", "fermer", "effacer", "schließen", "löschen", "chiudi", "cancella", "fechar", "limpar"]
+        var closed = 0
+        func walk(_ e: AXUIElement, _ depth: Int) {
+            guard depth < 14 else { return }
+            var names: CFArray?
+            if AXUIElementCopyActionNames(e, &names) == .success, let acts = names as? [String],
+               let close = acts.first(where: { a in let l = a.lowercased(); return words.contains { l.contains($0) } }) {
+                if AXUIElementPerformAction(e, close as CFString) == .success { closed += 1 }
+                return
+            }
+            var kids: CFTypeRef?
+            if AXUIElementCopyAttributeValue(e, kAXChildrenAttribute as CFString, &kids) == .success, let list = kids as? [AXUIElement] {
+                for k in list { walk(k, depth + 1) }
+            }
+        }
+        walk(AXUIElementCreateApplication(nc.processIdentifier), 0)
+        if closed > 0 { log("closed \(closed) notification(s)") }
     }
 
     // The opening: the logo comes in on black, then fades out larger while the bars and the tiles come in one after another.
@@ -463,6 +494,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         // A controller that has appeared since the last look (once a second): as the connect notification, which a controller turned off
         // and on again does not always bring
+        if window.isVisible, now.timeIntervalSince(lastDismiss) >= 2 { lastDismiss = now; dismissNotifications() }   // the ones that come while it shows
         if now.timeIntervalSince(lastCheck) >= 1 {
             lastCheck = now
             let has = GCController.controllers().contains { $0.extendedGamepad != nil }

@@ -61,6 +61,7 @@ Turning the controller off closes its Bluetooth connection, so the first time ma
 - **Log.** `~/Library/Logs/Console/console.log` records controllers connecting and disconnecting and why Console came up or not.
 - **Quitting a game with HOME** is like pressing ⌘Q: progress the game has not saved is lost, as on a console.
 - **Games from other ports.** To list an app that nxnative did not build, put its bundle identifier on a line of `~/Library/Application Support/Console/extra.txt` (find it with `osascript -e 'id of app "App Name"'`), then choose Refresh the list.
+- **Notification banners.** While Console is in front it closes the banners in the top right corner (a controller cannot reach their close button). That needs Accessibility: macOS asks the first time Console comes up; turn Console on in System Settings › Privacy & Security › Accessibility. As Console is built on your Mac, macOS may ask again after an update.
 - **No notifications while you play.** Add the **Gaming** Focus in System Settings › Focus and turn it on automatically *when a game controller is connected*: it comes on with Console and goes off with the controller.
 - **A console-like setup.** Keep the Mac on a USB-C dock with power and HDMI. Turn on the controller and Console comes up on the TV.
 
