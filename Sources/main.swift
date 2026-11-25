@@ -7,6 +7,7 @@ import AppKit
 import SwiftUI
 import GameController
 import IOKit.ps
+import IOBluetooth
 
 let cyan = Color(red: 0.0, green: 0.76, blue: 0.89)
 let gamePrefix = "org.nxnative."
@@ -24,22 +25,22 @@ let extraIDs: Set<String> = {
 let strings: [String: [String: String]] = [
     "en": ["noGames": "No games found in Applications", "connect": "Connect a controller", "play": "Play", "options": "Options",
            "homeHint": "Hold in a game: back here", "close": "B: close", "m0": "Play with the game's settings", "m1": "Refresh the list",
-           "m2": "Swap the A and B buttons", "m3": "Exit to the desktop", "m4": "Put the Mac to sleep"],
+           "m2": "Swap the A and B buttons", "m3": "Exit to the desktop", "m4": "Put the Mac to sleep", "m5": "Turn off the controller and exit"],
     "es": ["noGames": "No hay juegos en Aplicaciones", "connect": "Conecta un mando", "play": "Jugar", "options": "Opciones",
            "homeHint": "Mantener en el juego: volver aquí", "close": "B: cerrar", "m0": "Jugar con los ajustes del juego", "m1": "Actualizar la lista",
-           "m2": "Intercambiar los botones A y B", "m3": "Salir al escritorio", "m4": "Poner el Mac en reposo"],
+           "m2": "Intercambiar los botones A y B", "m3": "Salir al escritorio", "m4": "Poner el Mac en reposo", "m5": "Apagar el mando y salir"],
     "fr": ["noGames": "Aucun jeu dans Applications", "connect": "Connectez une manette", "play": "Jouer", "options": "Options",
            "homeHint": "Maintenir en jeu : revenir ici", "close": "B : fermer", "m0": "Jouer avec les réglages du jeu", "m1": "Actualiser la liste",
-           "m2": "Inverser les boutons A et B", "m3": "Quitter vers le bureau", "m4": "Suspendre le Mac"],
+           "m2": "Inverser les boutons A et B", "m3": "Quitter vers le bureau", "m4": "Suspendre le Mac", "m5": "Éteindre la manette et quitter"],
     "de": ["noGames": "Keine Spiele in Programme", "connect": "Controller verbinden", "play": "Spielen", "options": "Optionen",
            "homeHint": "Im Spiel halten: hierher zurück", "close": "B: schließen", "m0": "Mit den Spieleinstellungen spielen", "m1": "Liste aktualisieren",
-           "m2": "Tasten A und B tauschen", "m3": "Zum Schreibtisch", "m4": "Mac in den Ruhezustand"],
+           "m2": "Tasten A und B tauschen", "m3": "Zum Schreibtisch", "m4": "Mac in den Ruhezustand", "m5": "Controller ausschalten und beenden"],
     "it": ["noGames": "Nessun gioco in Applicazioni", "connect": "Collega un controller", "play": "Gioca", "options": "Opzioni",
            "homeHint": "Tieni premuto nel gioco: torna qui", "close": "B: chiudi", "m0": "Gioca con le impostazioni del gioco", "m1": "Aggiorna l'elenco",
-           "m2": "Scambia i pulsanti A e B", "m3": "Esci alla scrivania", "m4": "Metti il Mac in stop"],
+           "m2": "Scambia i pulsanti A e B", "m3": "Esci alla scrivania", "m4": "Metti il Mac in stop", "m5": "Spegni il controller ed esci"],
     "pt": ["noGames": "Nenhum jogo em Aplicativos", "connect": "Conecte um controle", "play": "Jogar", "options": "Opções",
            "homeHint": "Segure no jogo: voltar aqui", "close": "B: fechar", "m0": "Jogar com os ajustes do jogo", "m1": "Atualizar a lista",
-           "m2": "Trocar os botões A e B", "m3": "Sair para a mesa", "m4": "Colocar o Mac em repouso"],
+           "m2": "Trocar os botões A e B", "m3": "Sair para a mesa", "m4": "Colocar o Mac em repouso", "m5": "Desligar o controle e sair"],
 ]
 let lang: String = {
     let a = CommandLine.arguments
@@ -88,7 +89,7 @@ final class Model: ObservableObject {
     @Published var logo = false       // the opening: the logo on black
     @Published var logoIn = false     // the logo has come in
     @Published var revealed = true    // the bars and the tiles are in place (they come in one after another)
-    let menuItems = (0..<5).map { L("m\($0)") }
+    let menuItems = ["m0", "m1", "m2", "m3", "m5", "m4"].map { L($0) }   // the order on screen
 
     var lastPlayed: [String: Double] {
         get { UserDefaults.standard.dictionary(forKey: "lastPlayed") as? [String: Double] ?? [:] }
@@ -297,7 +298,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let startedAt = Date()
     var lastDir = 0, dirSince = Date.distantPast, lastRepeat = Date.distantPast
     var prevA = false, prevB = false, prevMenu = false
-    var homeSince: Date?, homeDone = false
+    var homeSince: Date?, homeDone = false, prevHome = false
+    var quietUntil = Date.distantPast   // a controller turned off from here may connect again for a moment: no coming up for it
 
     func applicationDidFinishLaunching(_ n: Notification) {
         GCController.shouldMonitorBackgroundEvents = true   // HOME must work while a game is in front
@@ -368,7 +370,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func controllerConnected() {
         updateController()
         let gameRunning = NSWorkspace.shared.runningApplications.contains { isGame($0.bundleIdentifier) }
-        if Date().timeIntervalSince(startedAt) > 3, running == nil, !gameRunning, !window.isVisible { show() }
+        if Date().timeIntervalSince(startedAt) > 3, Date() > quietUntil, running == nil, !gameRunning, !window.isVisible { show() }
     }
 
     func updateController() {
@@ -426,6 +428,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if Int(now.timeIntervalSince1970) % 30 == 0 { m.readBattery() }
         }
         guard let ctl = GCController.controllers().first(where: { $0.extendedGamepad != nil }), let pad = ctl.extendedGamepad else { return }
+        // HOME pressed while this screen is away and no game runs: come back (a controller left on after exiting to the desktop)
+        let homeDown = pad.buttonHome?.isPressed ?? false
+        if homeDown && !prevHome && !window.isVisible && running == nil
+            && !NSWorkspace.shared.runningApplications.contains(where: { isGame($0.bundleIdentifier) }) { show() }
+        prevHome = homeDown
         if let home = pad.buttonHome, home.isPressed {
             if homeSince == nil { homeSince = now } else if !homeDone, now.timeIntervalSince(homeSince!) > 1.2 { homeDone = true; homeHeld() }
         } else { homeSince = nil; homeDone = false }
@@ -479,6 +486,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func back() { if m.menuOpen { m.menuOpen = false } }
 
+    // Turns the controller off by closing its Bluetooth connection: Xbox, PlayStation and Nintendo controllers go to sleep when the Mac lets them go.
+    // The connected Bluetooth devices that are a joystick or gamepad (peripheral class 5, minor 1 or 2), or that carry a connected controller's name.
+    // The first time, macOS asks to let Console use Bluetooth. A USB controller stays on (it has no connection to close).
+    func turnOffController() {
+        let names = GCController.controllers().compactMap { $0.vendorName?.lowercased() }.filter { !$0.isEmpty }
+        quietUntil = Date().addingTimeInterval(15)
+        for d in (IOBluetoothDevice.pairedDevices() as? [IOBluetoothDevice]) ?? [] where d.isConnected() {
+            let name = (d.name ?? "").lowercased()
+            let gamepad = d.deviceClassMajor == 0x05 && [1, 2].contains(Int(d.deviceClassMinor) & 0x0F)
+            if gamepad || (!name.isEmpty && names.contains(where: { name.contains($0) || $0.contains(name) })) { d.closeConnection() }
+        }
+    }
+
     func toggleMenu() { m.menuSel = 0; m.menuOpen.toggle() }
 
     func menuAction(_ i: Int) {
@@ -487,8 +507,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case 1: m.scan(); m.menuOpen = false
         case 2: UserDefaults.standard.set(!UserDefaults.standard.bool(forKey: "swapAB"), forKey: "swapAB"); m.menuOpen = false
         case 3: m.menuOpen = false; hide()
-        case 4:
-            m.menuOpen = false; hide()
+        case 4: m.menuOpen = false; turnOffController(); hide()
+        case 5:
+            m.menuOpen = false; turnOffController(); hide()
             let p = Process(); p.executableURL = URL(fileURLWithPath: "/usr/bin/pmset"); p.arguments = ["sleepnow"]; try? p.run()
         default: break
         }

@@ -14,4 +14,5 @@
 <key>NSHighResolutionCapable</key><true/>
 <key>NSPrincipalClass</key><string>NSApplication</string>
 <key>GCSupportsControllerUserInteraction</key><true/>
+<key>NSBluetoothAlwaysUsageDescription</key><string>Console turns your game controller off when you exit to the desktop or put the Mac to sleep.</string>
 </dict></plist>

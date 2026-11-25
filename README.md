@@ -9,7 +9,8 @@
 - **Finds your games by itself.** Every app nxnative built (`org.nxnative.*`) in `/Applications` or `~/Applications` shows up, with its icon as the cover. The game you played last comes first.
 - **Comes up when a controller connects.** It waits in the background from login and opens full screen when you turn on a Bluetooth or USB controller. With a TV or monitor plugged in, it opens on that screen, not on the Mac's own.
 - **Starts the game straight away.** A opens the selected game with the settings you saved in its launcher, without showing the settings window. When the game ends, you are back on the home screen.
-- **Goes back home from a game.** Hold HOME for about a second in a game to quit it and come back.
+- **Goes back home from a game.** Hold HOME for about a second in a game to quit it and come back. After you exit to the desktop, a press of HOME brings Console back.
+- **Turns the controller off.** Choose **Turn off the controller and exit** (or put the Mac to sleep from the options) and the Bluetooth controller goes to sleep.
 - **Speaks your Mac's language.** English, Spanish, French, German, Italian and Portuguese, following System Settings › General › Language & Region; English for any other language.
 - **Has an opening animation** when it comes up.
 
@@ -45,11 +46,14 @@ To update, run `git pull` and `./install.sh` again. To remove it, run `./uninsta
 | + (Menu / Options) | Tab | Options |
 | B | Esc | Close the options |
 | Hold HOME in a game | | Quit the game and come back |
+| HOME, on the desktop | | Bring Console back |
 | | Esc on the home screen | Exit to the desktop |
 
 On Nintendo controllers, A is the right-hand button, as on the Switch; on others it is the bottom one. If they come out swapped, choose **Swap the A and B buttons** in the options.
 
-**Options:** play with the game's settings window (to change resolution, frame rate and so on before playing), refresh the list, swap A and B, exit to the desktop, put the Mac to sleep.
+**Options:** play with the game's settings window (to change resolution, frame rate and so on before playing), refresh the list, swap A and B, exit to the desktop, turn off the controller and exit, put the Mac to sleep (which turns the controller off too).
+
+Turning the controller off closes its Bluetooth connection, so the first time macOS asks to let Console use Bluetooth. A USB controller stays on.
 
 ## Tips
 
