@@ -300,6 +300,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var prevA = false, prevB = false, prevMenu = false
     var homeSince: Date?, homeDone = false, prevHome = false
     var quietUntil = Date.distantPast   // a controller turned off from here may connect again for a moment: no coming up for it
+    var hadController = false, lastCheck = Date.distantPast, prevWake = false
+    var cursorHidden = false
+
+    // ~/Library/Logs/Console/console.log: controllers coming and going, the buttons that bring this screen up, showing and hiding
+    let logURL: URL = {
+        let d = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/Console")
+        try? FileManager.default.createDirectory(at: d, withIntermediateDirectories: true)
+        return d.appendingPathComponent("console.log")
+    }()
+    func log(_ text: String) {
+        let line = "\(Date()) \(text)\n"
+        if let h = try? FileHandle(forWritingTo: logURL) { h.seekToEndOfFile(); h.write(Data(line.utf8)); try? h.close() }
+        else { try? line.write(to: logURL, atomically: true, encoding: .utf8) }
+    }
+
+    func setCursorHidden(_ hidden: Bool) {   // NSCursor.hide and unhide nest: one of each
+        guard hidden != cursorHidden else { return }
+        cursorHidden = hidden
+        if hidden { NSCursor.hide() } else { NSCursor.unhide() }
+    }
 
     func applicationDidFinishLaunching(_ n: Notification) {
         GCController.shouldMonitorBackgroundEvents = true   // HOME must work while a game is in front
@@ -310,8 +330,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         window.collectionBehavior = [.fullScreenNone, .canJoinAllSpaces]
         window.onKey = { [weak self] k in self?.key(k) }
         let nc = NotificationCenter.default
-        nc.addObserver(forName: .GCControllerDidConnect, object: nil, queue: .main) { [weak self] _ in self?.controllerConnected() }
-        nc.addObserver(forName: .GCControllerDidDisconnect, object: nil, queue: .main) { [weak self] _ in self?.updateController() }
+        nc.addObserver(forName: .GCControllerDidConnect, object: nil, queue: .main) { [weak self] n in
+            self?.log("controller connected: \((n.object as? GCController)?.vendorName ?? "?")"); self?.controllerConnected()
+        }
+        nc.addObserver(forName: .GCControllerDidDisconnect, object: nil, queue: .main) { [weak self] n in
+            self?.log("controller disconnected: \((n.object as? GCController)?.vendorName ?? "?")"); self?.updateController()
+        }
         nc.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main) { [weak self] _ in
             if self?.window.isVisible == true { self?.place() }
         }
@@ -324,11 +348,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         RunLoop.main.add(timer!, forMode: .common)
         m.readBattery()
         updateController()
+        hadController = m.controller != nil
+        log("started\(CommandLine.arguments.contains("--hidden") ? " (hidden)" : ""), controller: \(m.controller ?? "none")")
         if CommandLine.arguments.contains("--hidden") { NSApp.setActivationPolicy(.accessory) } else { show() }
     }
 
     func applicationShouldHandleReopen(_ s: NSApplication, hasVisibleWindows f: Bool) -> Bool { if running == nil { show() }; return false }
-    func applicationDidBecomeActive(_ n: Notification) { if window.isVisible { NSApp.presentationOptions = [.hideDock, .hideMenuBar] } }
+    func applicationDidBecomeActive(_ n: Notification) {
+        if window.isVisible { NSApp.presentationOptions = [.hideDock, .hideMenuBar]; setCursorHidden(true) }
+    }
+    func applicationDidResignActive(_ n: Notification) { setCursorHidden(false) }   // a game or another app in front gets its pointer back
 
     // MARK: showing and hiding
 
@@ -340,7 +369,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         place()
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
-        NSCursor.setHiddenUntilMouseMoves(true)
+        setCursorHidden(true)
+        log("shown")
     }
 
     // The opening: the logo comes in on black, then fades out larger while the bars and the tiles come in one after another.
@@ -362,6 +392,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func hide() {
+        log("hidden")
+        setCursorHidden(false)
         NSApp.presentationOptions = []
         window.orderOut(nil)
         NSApp.setActivationPolicy(.accessory)
@@ -370,7 +402,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func controllerConnected() {
         updateController()
         let gameRunning = NSWorkspace.shared.runningApplications.contains { isGame($0.bundleIdentifier) }
-        if Date().timeIntervalSince(startedAt) > 3, Date() > quietUntil, running == nil, !gameRunning, !window.isVisible { show() }
+        let ok = Date().timeIntervalSince(startedAt) > 3 && Date() > quietUntil && running == nil && !gameRunning && !window.isVisible
+        if !window.isVisible { log(ok ? "coming up for the controller" : "not coming up (\(Date() <= quietUntil ? "just turned off" : running != nil || gameRunning ? "a game runs" : "starting"))") }
+        if ok { show() }
     }
 
     func updateController() {
@@ -427,12 +461,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             m.now = now
             if Int(now.timeIntervalSince1970) % 30 == 0 { m.readBattery() }
         }
+        // A controller that has appeared since the last look (once a second): as the connect notification, which a controller turned off
+        // and on again does not always bring
+        if now.timeIntervalSince(lastCheck) >= 1 {
+            lastCheck = now
+            let has = GCController.controllers().contains { $0.extendedGamepad != nil }
+            if has && !hadController { log("controller seen"); controllerConnected() } else if !has && hadController { updateController() }
+            hadController = has
+        }
         guard let ctl = GCController.controllers().first(where: { $0.extendedGamepad != nil }), let pad = ctl.extendedGamepad else { return }
-        // HOME pressed while this screen is away and no game runs: come back (a controller left on after exiting to the desktop)
-        let homeDown = pad.buttonHome?.isPressed ?? false
-        if homeDown && !prevHome && !window.isVisible && running == nil
-            && !NSWorkspace.shared.runningApplications.contains(where: { isGame($0.bundleIdentifier) }) { show() }
-        prevHome = homeDown
+        // HOME or OPTIONS (+) pressed while this screen is away and no game runs: come back (a controller left on after exiting to the desktop).
+        // OPTIONS too, as macOS may keep HOME for itself (Launchpad or the Games app) and then no app sees it.
+        let wake = (pad.buttonHome?.isPressed ?? false) || pad.buttonMenu.isPressed
+        if wake && !prevWake && !window.isVisible && running == nil
+            && !NSWorkspace.shared.runningApplications.contains(where: { isGame($0.bundleIdentifier) }) { log("HOME/OPTIONS pressed on the desktop"); show() }
+        prevWake = wake
         if let home = pad.buttonHome, home.isPressed {
             if homeSince == nil { homeSince = now } else if !homeDone, now.timeIntervalSince(homeSince!) > 1.2 { homeDone = true; homeHeld() }
         } else { homeSince = nil; homeDone = false }
@@ -491,11 +534,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // The first time, macOS asks to let Console use Bluetooth. A USB controller stays on (it has no connection to close).
     func turnOffController() {
         let names = GCController.controllers().compactMap { $0.vendorName?.lowercased() }.filter { !$0.isEmpty }
-        quietUntil = Date().addingTimeInterval(15)
+        quietUntil = Date().addingTimeInterval(6)
         for d in (IOBluetoothDevice.pairedDevices() as? [IOBluetoothDevice]) ?? [] where d.isConnected() {
             let name = (d.name ?? "").lowercased()
             let gamepad = d.deviceClassMajor == 0x05 && [1, 2].contains(Int(d.deviceClassMinor) & 0x0F)
-            if gamepad || (!name.isEmpty && names.contains(where: { name.contains($0) || $0.contains(name) })) { d.closeConnection() }
+            if gamepad || (!name.isEmpty && names.contains(where: { name.contains($0) || $0.contains(name) })) {
+                log("turning off \(d.name ?? "?"): \(d.closeConnection() == kIOReturnSuccess ? "ok" : "failed")")
+            }
         }
     }
 
