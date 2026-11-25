@@ -341,6 +341,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         nc.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main) { [weak self] _ in
             if self?.window.isVisible == true { self?.place() }
         }
+        // Apple's Games app (which the controller's HOME button opens) is closed as it opens, and this screen comes up in its place, unless a
+        // game runs. defaults write io.github.vtanco.console replaceGamesApp -bool false turns that off.
+        NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didLaunchApplicationNotification, object: nil, queue: .main) { [weak self] n in
+            guard let self, let app = n.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication, app.bundleIdentifier == "com.apple.games",
+                  UserDefaults.standard.object(forKey: "replaceGamesApp") as? Bool ?? true else { return }
+            self.log("Games app opened: closing it")
+            app.forceTerminate()
+            let gameRunning = NSWorkspace.shared.runningApplications.contains { isGame($0.bundleIdentifier) }
+            if self.running == nil && !gameRunning { self.show(intro: !self.window.isVisible) }
+        }
         NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didTerminateApplicationNotification, object: nil, queue: .main) { [weak self] n in
             guard let self, let app = n.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
                   let id = app.bundleIdentifier, id == self.running else { return }

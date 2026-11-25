@@ -57,6 +57,7 @@ Turning the controller off closes its Bluetooth connection, so the first time ma
 
 ## Tips
 
+- **Apple's Games app.** HOME on the controller opens it on recent macOS. Console closes it as it opens and comes up in its place (unless a game runs), so HOME works as a console's home button. `defaults write io.github.vtanco.console replaceGamesApp -bool false` turns that off.
 - **HOME opens Launchpad or the Games app?** macOS can keep the controller's HOME button for itself, and then no app sees it. Turn that off in System Settings › Game Controllers › your controller, so holding HOME in a game reaches Console. On the desktop, OPTIONS (+) brings Console back either way.
 - **Log.** `~/Library/Logs/Console/console.log` records controllers connecting and disconnecting and why Console came up or not.
 - **Quitting a game with HOME** is like pressing ⌘Q: progress the game has not saved is lost, as on a console.
