@@ -1,4 +1,4 @@
-# NX Native Launcher
+# Console for nxnative
 
 **Console** is a home screen for the games you built with [nxnative](https://github.com/seedds/nxnative). It shows them as a row of covers, like a console's home screen, and you drive it with a game controller. Plug the Mac into the TV, turn on the controller, pick a game.
 
@@ -28,8 +28,8 @@
 ## Install
 
 ```bash
-git clone https://github.com/vTanco/nxnative-launcher.git
-cd nxnative-launcher
+git clone https://github.com/vTanco/nxnative-console.git
+cd nxnative-console
 ./install.sh
 ```
 
