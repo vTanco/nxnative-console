@@ -509,10 +509,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // Off the main thread: changing the output to an HDMI device makes coreaudiod set up the TV's audio, and the call waits for it (about
     // 10 s measured with an LG TV), which froze the screen, its opening and the controller. Nothing is changed when the TV is already the output.
     let audioQueue = DispatchQueue(label: "audio")
+    // audioOutput: "tv" (the default), "mac" (the Mac's own speakers, as macOS often moves the output to a TV when it is plugged in, and
+    // some docks pass no sound to it) or "off" (left as it is). The older audioToTV false is "off".
     func routeAudioToTV() {
-        guard UserDefaults.standard.object(forKey: "audioToTV") as? Bool ?? true else { return }
+        let pref = UserDefaults.standard.string(forKey: "audioOutput") ?? (UserDefaults.standard.object(forKey: "audioToTV") as? Bool == false ? "off" : "tv")
+        guard pref != "off" else { return }
         audioQueue.async { [weak self] in
-            guard let tv = outputDevices().first(where: { $0.2 == kAudioDeviceTransportTypeHDMI || $0.2 == kAudioDeviceTransportTypeDisplayPort }) else { return }
+            let mine = pref == "mac" ? [kAudioDeviceTransportTypeBuiltIn] : [kAudioDeviceTransportTypeHDMI, kAudioDeviceTransportTypeDisplayPort]
+            guard let tv = outputDevices().first(where: { mine.contains($0.2) }) else { return }
             let sys = AudioObjectID(kAudioObjectSystemObject)
             var cur = AudioDeviceID(0), size = UInt32(MemoryLayout<AudioDeviceID>.size)
             var da = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyDefaultOutputDevice, mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
