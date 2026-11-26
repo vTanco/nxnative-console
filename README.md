@@ -11,6 +11,8 @@
 - **Starts the game straight away.** A opens the selected game with the settings you saved in its launcher, without showing the settings window. When the game ends, you are back on the home screen.
 - **Goes back home from a game.** Hold HOME for about a second in a game to quit it and come back. After you exit to the desktop, a press of HOME or OPTIONS (+) brings Console back.
 - **Turns the controller off.** Choose **Turn off the controller and exit** (or put the Mac to sleep from the options) and the Bluetooth controller goes to sleep.
+- **Sound on the TV.** When Console comes up with a TV plugged in (HDMI, or DisplayPort through a USB-C dock), the TV becomes the Mac's sound output. `defaults write io.github.vtanco.console audioToTV -bool false` turns that off.
+- **Pointer out of the way.** When a game starts, the pointer moves to a corner of the Mac's own screen (or of the only screen), off the picture.
 - **Speaks your Mac's language.** English, Spanish, French, German, Italian and Portuguese, following System Settings › General › Language & Region; English for any other language.
 - **Has an opening animation** when it comes up.
 

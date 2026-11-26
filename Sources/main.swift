@@ -9,6 +9,7 @@ import GameController
 import IOKit.ps
 import IOBluetooth
 import ApplicationServices
+import CoreAudio
 
 let cyan = Color(red: 0.0, green: 0.76, blue: 0.89)
 let gamePrefix = "org.nxnative."
@@ -53,7 +54,26 @@ func L(_ k: String) -> String { strings[lang]?[k] ?? strings["en"]?[k] ?? k }
 
 func isGame(_ id: String?) -> Bool { guard let id else { return false }; return id.hasPrefix(gamePrefix) || extraIDs.contains(id) }
 
-struct Game: Identifiable { let id: String; let name: String; let url: URL; let icon: NSImage }
+struct Game: Identifiable { let id: String; let name: String; let url: URL; let icon: NSImage; let tile: NSImage }
+
+// The tile as the screen shows it, drawn once: the picture with rounded corners and its drop shadow, on a canvas TILE_PAD larger on each side.
+// SwiftUI drawing a blurred shadow per tile on every frame of a move made the screen stutter at TV resolution.
+let TILE_PAD: CGFloat = 0.10
+func bakedTile(_ img: NSImage) -> NSImage {
+    let S: CGFloat = 512, P = S * TILE_PAD, side = S + 2 * P
+    let out = NSImage(size: NSSize(width: side, height: side), flipped: false) { _ in
+        let r = NSRect(x: P, y: P, width: S, height: S), path = NSBezierPath(roundedRect: r, xRadius: S * 0.03, yRadius: S * 0.03)
+        NSGraphicsContext.saveGraphicsState()
+        let sh = NSShadow(); sh.shadowColor = NSColor.black.withAlphaComponent(0.5); sh.shadowBlurRadius = S * 0.04; sh.shadowOffset = NSSize(width: 0, height: -S * 0.02)
+        sh.set(); NSColor.black.setFill(); path.fill()
+        NSGraphicsContext.restoreGraphicsState()
+        path.addClip(); img.draw(in: r)
+        return true
+    }
+    var rect = NSRect(x: 0, y: 0, width: side, height: side)
+    guard let cg = out.cgImage(forProposedRect: &rect, context: nil, hints: nil) else { return out }
+    return NSImage(cgImage: cg, size: out.size)   // a bitmap now, not a drawing handler run again at each draw
+}
 
 // The icon of an app as a square tile picture. Icons drawn as a macOS rounded square with a transparent margin (the ones made from
 // box art) are cropped to the inside of that square, so that every tile is a full square picture like the game icons from the games' own data.
@@ -103,7 +123,8 @@ final class Model: ObservableObject {
             for u in (try? fm.contentsOfDirectory(at: d, includingPropertiesForKeys: nil)) ?? [] where u.pathExtension == "app" {
                 guard let b = Bundle(url: u), let id = b.bundleIdentifier, isGame(id), !seen.contains(id) else { continue }
                 seen.insert(id)
-                out.append(Game(id: id, name: u.deletingPathExtension().lastPathComponent, url: u, icon: tileImage(u)))
+                let icon = tileImage(u)
+                out.append(Game(id: id, name: u.deletingPathExtension().lastPathComponent, url: u, icon: icon, tile: bakedTile(icon)))
             }
         }
         let lp = lastPlayed
@@ -198,9 +219,8 @@ struct HomeView: View {
         return VStack(alignment: .leading, spacing: H * 0.018) {
             Text(g.name).font(font(H * 0.032, .medium)).foregroundColor(cyan).lineLimit(1).fixedSize()
                 .frame(width: tile, alignment: .leading).opacity(on ? 1 : 0)
-            Image(nsImage: g.icon).resizable().interpolation(.high).aspectRatio(contentMode: .fill)
-                .frame(width: tile, height: tile).clipShape(RoundedRectangle(cornerRadius: tile * 0.03))
-                .shadow(color: .black.opacity(0.45), radius: H * 0.012, y: H * 0.006)
+            Image(nsImage: g.tile).resizable().interpolation(.high)
+                .frame(width: tile * (1 + 2 * TILE_PAD), height: tile * (1 + 2 * TILE_PAD)).padding(-tile * TILE_PAD)
                 .overlay(RoundedRectangle(cornerRadius: tile * 0.05).stroke(on ? cyan : .clear, lineWidth: H * 0.006).padding(-H * 0.009))
                 .scaleEffect(on ? 1.04 : 1)
                 .animation(.easeOut(duration: 0.15), value: on)
@@ -291,6 +311,28 @@ func isBuiltIn(_ s: NSScreen) -> Bool {
     return CGDisplayIsBuiltin(n.uint32Value) != 0
 }
 
+// The audio outputs: (id, name, transport type)
+func outputDevices() -> [(AudioDeviceID, String, UInt32)] {
+    let sys = AudioObjectID(kAudioObjectSystemObject)
+    var addr = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyDevices, mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+    var size: UInt32 = 0
+    guard AudioObjectGetPropertyDataSize(sys, &addr, 0, nil, &size) == noErr else { return [] }
+    var ids = [AudioDeviceID](repeating: 0, count: Int(size) / MemoryLayout<AudioDeviceID>.size)
+    guard AudioObjectGetPropertyData(sys, &addr, 0, nil, &size, &ids) == noErr else { return [] }
+    return ids.compactMap { id in
+        var sa = AudioObjectPropertyAddress(mSelector: kAudioDevicePropertyStreams, mScope: kAudioDevicePropertyScopeOutput, mElement: kAudioObjectPropertyElementMain)
+        var ss: UInt32 = 0
+        guard AudioObjectGetPropertyDataSize(id, &sa, 0, nil, &ss) == noErr, ss > 0 else { return nil }   // no output streams: a microphone
+        var t: UInt32 = 0, ts = UInt32(MemoryLayout<UInt32>.size)
+        var ta = AudioObjectPropertyAddress(mSelector: kAudioDevicePropertyTransportType, mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+        AudioObjectGetPropertyData(id, &ta, 0, nil, &ts, &t)
+        var name: Unmanaged<CFString>?, ns = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
+        var na = AudioObjectPropertyAddress(mSelector: kAudioObjectPropertyName, mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+        AudioObjectGetPropertyData(id, &na, 0, nil, &ns, &name)
+        return (id, (name?.takeRetainedValue() as String?) ?? "?", t)
+    }
+}
+
 final class AppDelegate: NSObject, NSApplicationDelegate {
     let m = Model()
     var window: HomeWindow!
@@ -369,7 +411,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidBecomeActive(_ n: Notification) {
         if window.isVisible { NSApp.presentationOptions = [.hideDock, .hideMenuBar]; setCursorHidden(true) }
     }
-    func applicationDidResignActive(_ n: Notification) { setCursorHidden(false) }   // a game or another app in front gets its pointer back
+    func applicationDidResignActive(_ n: Notification) { if running != nil { parkPointer() }; setCursorHidden(false) }   // a game or another app in front gets its pointer back
 
     // MARK: showing and hiding
 
@@ -379,10 +421,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if !wasVisible { opening(full: intro) }
         NSApp.setActivationPolicy(.regular)
         place()
+        window.level = .floating   // over the other windows even when macOS does not let this app in front
         window.makeKeyAndOrderFront(nil)
+        window.orderFrontRegardless()
         NSApp.activate(ignoringOtherApps: true)
+        NSRunningApplication.current.activate(options: [.activateAllWindows])
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
+            guard let self, self.window.isVisible else { return }
+            if !NSApp.isActive { NSApp.activate(ignoringOtherApps: true) }
+            self.log(NSApp.isActive ? "in front" : "shown, but macOS kept another app in front (the controller works anyway)")
+        }
         setCursorHidden(true)
         log("shown")
+        routeAudioToTV()
         if !askedAccess {   // closing notification banners needs Accessibility: macOS asks once (System Settings › Privacy & Security › Accessibility)
             askedAccess = true
             _ = AXIsProcessTrustedWithOptions([kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary)
@@ -393,9 +444,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // Closes the notification banners on screen (the top right corner), as their close button does: a controller cannot reach them.
     // Notification Center's elements with a close or clear action, in the languages the menus are in. Needs Accessibility; without it, nothing.
+    let axQueue = DispatchQueue(label: "notifications")
+    var axBusy = false
+    // Off the main thread: reading Notification Center through Accessibility can take tens of milliseconds, a stutter on the screen each time.
+    // Its windows are looked at first, and the walk runs only when one is up.
     func dismissNotifications() {
-        guard AXIsProcessTrusted(),
+        guard !axBusy, AXIsProcessTrusted(),
               let nc = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.notificationcenterui").first else { return }
+        axBusy = true
+        let pid = nc.processIdentifier
+        axQueue.async { [weak self] in
+            let closed = Self.closeBanners(pid)
+            DispatchQueue.main.async { self?.axBusy = false; if closed > 0 { self?.log("closed \(closed) notification(s)") } }
+        }
+    }
+
+    static func closeBanners(_ pid: pid_t) -> Int {
+        let app = AXUIElementCreateApplication(pid)
+        var wins: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(app, kAXWindowsAttribute as CFString, &wins) == .success, let list = wins as? [AXUIElement], !list.isEmpty else { return 0 }
         let words = ["close", "clear", "dismiss", "cerrar", "borrar", "fermer", "effacer", "schließen", "löschen", "chiudi", "cancella", "fechar", "limpar"]
         var closed = 0
         func walk(_ e: AXUIElement, _ depth: Int) {
@@ -411,8 +478,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 for k in list { walk(k, depth + 1) }
             }
         }
-        walk(AXUIElementCreateApplication(nc.processIdentifier), 0)
-        if closed > 0 { log("closed \(closed) notification(s)") }
+        for w in list { walk(w, 1) }
+        return closed
     }
 
     // The opening: the logo comes in on black, then fades out larger while the bars and the tiles come in one after another.
@@ -426,6 +493,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         } else {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { self.m.revealed = true }
         }
+    }
+
+    // The sound to the TV: the first audio output on HDMI or DisplayPort (a TV on a USB-C dock comes as either) becomes the Mac's output,
+    // for games and for alerts. Unplugging the TV puts macOS back on the Mac's speakers by itself. defaults write io.github.vtanco.console
+    // audioToTV -bool false turns it off.
+    func routeAudioToTV() {
+        guard UserDefaults.standard.object(forKey: "audioToTV") as? Bool ?? true,
+              let tv = outputDevices().first(where: { $0.2 == kAudioDeviceTransportTypeHDMI || $0.2 == kAudioDeviceTransportTypeDisplayPort }) else { return }
+        var id = tv.0
+        for sel in [kAudioHardwarePropertyDefaultOutputDevice, kAudioHardwarePropertyDefaultSystemOutputDevice] {
+            var addr = AudioObjectPropertyAddress(mSelector: sel, mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+            AudioObjectSetPropertyData(AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil, UInt32(MemoryLayout<AudioDeviceID>.size), &id)
+        }
+        log("sound to \(tv.1)")
+    }
+
+    // The pointer off the picture while a game runs: to the bottom right corner of the Mac's own screen when the TV is another screen,
+    // else of the only screen. The games hide it at a controller press, until the mouse moves; out of the way, a nudge does not show it on the TV.
+    func parkPointer() {
+        let screens = NSScreen.screens
+        guard let primary = screens.first else { return }
+        let target = (screens.count > 1 ? screens.first(where: { isBuiltIn($0) }) : nil) ?? screens.first(where: { !isBuiltIn($0) }) ?? primary
+        let f = target.frame
+        CGWarpMouseCursorPosition(CGPoint(x: f.maxX - 1, y: primary.frame.maxY - (f.minY + 1)))   // Quartz: the top left of the primary screen is 0,0
+        CGAssociateMouseAndMouseCursorPosition(1)
     }
 
     func place() {   // the TV (any screen that is not the Mac's own) when there is one
@@ -529,7 +621,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let swap = nintendo != UserDefaults.standard.bool(forKey: "swapAB")
         let a = (swap ? pad.buttonB : pad.buttonA).isPressed, b = (swap ? pad.buttonA : pad.buttonB).isPressed, menu = pad.buttonMenu.isPressed
         defer { prevA = a; prevB = b; prevMenu = menu }
-        guard window.isVisible, NSApp.isActive, running == nil, !m.logo else { lastDir = 0; return }
+        // While this screen shows, the controller drives it whether or not macOS made this app the active one: an app that comes up by
+        // itself (a controller connecting) is not always let in front, and the controller's input reaches it in the background anyway.
+        guard window.isVisible, running == nil, !m.logo else { lastDir = 0; return }
         let x = pad.dpad.xAxis.value + pad.leftThumbstick.xAxis.value, y = pad.dpad.yAxis.value + pad.leftThumbstick.yAxis.value
         var dir = 0
         if abs(x) > 0.5, abs(x) >= abs(y) { dir = x > 0 ? 1 : -1 } else if abs(y) > 0.5 { dir = y > 0 ? 2 : -2 }
