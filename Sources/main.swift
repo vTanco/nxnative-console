@@ -117,14 +117,21 @@ final class Model: ObservableObject {
         set { UserDefaults.standard.set(newValue, forKey: "lastPlayed") }
     }
 
+    // The covers made once per app (by its path and modification time), so coming up redraws none of them: reading and baking all of them
+    // held the screen up 0.6 s before its opening
+    var covers: [String: (Date, NSImage, NSImage)] = [:]
+
     func scan() {
         let fm = FileManager.default; var out: [Game] = []; var seen = Set<String>()
         for d in [URL(fileURLWithPath: "/Applications"), fm.homeDirectoryForCurrentUser.appendingPathComponent("Applications")] {
             for u in (try? fm.contentsOfDirectory(at: d, includingPropertiesForKeys: nil)) ?? [] where u.pathExtension == "app" {
                 guard let b = Bundle(url: u), let id = b.bundleIdentifier, isGame(id), !seen.contains(id) else { continue }
                 seen.insert(id)
-                let icon = tileImage(u)
-                out.append(Game(id: id, name: u.deletingPathExtension().lastPathComponent, url: u, icon: icon, tile: bakedTile(icon)))
+                let mtime = (try? fm.attributesOfItem(atPath: u.path)[.modificationDate] as? Date) ?? .distantPast
+                let icon: NSImage, tile: NSImage
+                if let c = covers[u.path], c.0 == mtime { (icon, tile) = (c.1, c.2) }
+                else { icon = tileImage(u); tile = bakedTile(icon); covers[u.path] = (mtime, icon, tile) }
+                out.append(Game(id: id, name: u.deletingPathExtension().lastPathComponent, url: u, icon: icon, tile: tile))
             }
         }
         let lp = lastPlayed
@@ -345,6 +352,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var quietUntil = Date.distantPast   // a controller turned off from here may connect again for a moment: no coming up for it
     var hadController = false, lastCheck = Date.distantPast, prevWake = false
     var cursorHidden = false
+    var lastPoll = Date.distantPast   // a gap between two looks at the controller is the main thread held up: logged while the screen shows
     var lastDismiss = Date.distantPast, askedAccess = false
 
     // ~/Library/Logs/Console/console.log: controllers coming and going, the buttons that bring this screen up, showing and hiding
@@ -404,7 +412,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         updateController()
         hadController = m.controller != nil
         log("started\(CommandLine.arguments.contains("--hidden") ? " (hidden)" : ""), controller: \(m.controller ?? "none")")
-        if CommandLine.arguments.contains("--hidden") { NSApp.setActivationPolicy(.accessory) } else { show() }
+        if CommandLine.arguments.contains("--hidden") { NSApp.setActivationPolicy(.accessory); m.scan() } else { show() }   // hidden: the covers made now
     }
 
     func applicationShouldHandleReopen(_ s: NSApplication, hasVisibleWindows f: Bool) -> Bool { if running == nil { show() }; return false }
@@ -498,15 +506,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // The sound to the TV: the first audio output on HDMI or DisplayPort (a TV on a USB-C dock comes as either) becomes the Mac's output,
     // for games and for alerts. Unplugging the TV puts macOS back on the Mac's speakers by itself. defaults write io.github.vtanco.console
     // audioToTV -bool false turns it off.
+    // Off the main thread: changing the output to an HDMI device makes coreaudiod set up the TV's audio, and the call waits for it (about
+    // 10 s measured with an LG TV), which froze the screen, its opening and the controller. Nothing is changed when the TV is already the output.
+    let audioQueue = DispatchQueue(label: "audio")
     func routeAudioToTV() {
-        guard UserDefaults.standard.object(forKey: "audioToTV") as? Bool ?? true,
-              let tv = outputDevices().first(where: { $0.2 == kAudioDeviceTransportTypeHDMI || $0.2 == kAudioDeviceTransportTypeDisplayPort }) else { return }
-        var id = tv.0
-        for sel in [kAudioHardwarePropertyDefaultOutputDevice, kAudioHardwarePropertyDefaultSystemOutputDevice] {
-            var addr = AudioObjectPropertyAddress(mSelector: sel, mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
-            AudioObjectSetPropertyData(AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil, UInt32(MemoryLayout<AudioDeviceID>.size), &id)
+        guard UserDefaults.standard.object(forKey: "audioToTV") as? Bool ?? true else { return }
+        audioQueue.async { [weak self] in
+            guard let tv = outputDevices().first(where: { $0.2 == kAudioDeviceTransportTypeHDMI || $0.2 == kAudioDeviceTransportTypeDisplayPort }) else { return }
+            let sys = AudioObjectID(kAudioObjectSystemObject)
+            var cur = AudioDeviceID(0), size = UInt32(MemoryLayout<AudioDeviceID>.size)
+            var da = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyDefaultOutputDevice, mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+            if AudioObjectGetPropertyData(sys, &da, 0, nil, &size, &cur) == noErr, cur == tv.0 { return }
+            let t0 = Date()
+            var id = tv.0
+            for sel in [kAudioHardwarePropertyDefaultOutputDevice, kAudioHardwarePropertyDefaultSystemOutputDevice] {
+                var addr = AudioObjectPropertyAddress(mSelector: sel, mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+                AudioObjectSetPropertyData(sys, &addr, 0, nil, UInt32(MemoryLayout<AudioDeviceID>.size), &id)
+            }
+            let took = Date().timeIntervalSince(t0)
+            DispatchQueue.main.async { self?.log("sound to \(tv.1) (\(String(format: "%.1f", took)) s)") }
         }
-        log("sound to \(tv.1)")
     }
 
     // The pointer off the picture while a game runs: to the bottom right corner of the Mac's own screen when the TV is another screen,
@@ -588,10 +607,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: input
 
     // NSSound(named:) is one shared sound: play() while it still plays does nothing (every other move was silent), so it is restarted
-    func sound(_ name: String) { if let s = NSSound(named: NSSound.Name(name)) { s.volume = 0.25; s.stop(); s.play() } }
+    // On the audio queue too: a sound played while the output is moving to the TV waits for coreaudiod, and on the main thread that wait
+    // was the freeze; queued behind the move, it plays once the TV is ready
+    func sound(_ name: String) {
+        audioQueue.async { if let s = NSSound(named: NSSound.Name(name)) { s.volume = 0.25; s.stop(); s.play() } }
+    }
 
     func poll() {
         let now = Date()
+        let gap = now.timeIntervalSince(lastPoll); lastPoll = now
+        if window.isVisible, gap > 0.5, gap < 3600 { log(String(format: "screen held up for %.1f s", gap)) }
         if now.timeIntervalSince(m.now) >= 1 {
             m.now = now
             if Int(now.timeIntervalSince1970) % 30 == 0 { m.readBattery() }
